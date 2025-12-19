@@ -19,16 +19,12 @@ from typing import Any, Dict, List, Union
 import evaluate
 
 # ==========================================
-# 0. Logger Setup (NEW)
+# 0. Logger Setup
 # ==========================================
-# Setup logging to print to console and save to a file
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
     datefmt="%m/%d/%Y %H:%M:%S",
-    handlers=[
-        logging.StreamHandler(sys.stdout),  # Print to console
-        logging.FileHandler("training.log"),  # Save to file
-    ],
+    handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler("training.log")],
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
@@ -36,24 +32,32 @@ logger = logging.getLogger(__name__)
 # ==========================================
 # 1. Configuration
 # ==========================================
-# Set your model size here: "small", "medium", or "large"
 MODEL_SIZE = "small"
-MODEL_DIR = "modified_whisper_model"  # Path to model from Step 1
-WAV_SCP = "path/to/wav.scp"
-TEXT_FILE = "path/to/text"
+MODEL_DIR = "modified_whisper_model"
 OUTPUT_DIR = "./whisper-finetuned-multitalker"
 TIMESTAMP_DROP_PROB = 0.5
+
+# --- TRAIN DATA ---
+TRAIN_WAV_SCP = "path/to/train/wav.scp"
+TRAIN_TEXT_FILE = "path/to/train/text"
+
+# --- VALIDATION DATA ---
+VAL_WAV_SCP = "path/to/validation/wav.scp"
+VAL_TEXT_FILE = "path/to/validation/text"
 
 
 # ==========================================
 # 2. Dataset & Collator
 # ==========================================
 class ESPnetStyleDataset(Dataset):
-    def __init__(self, wav_scp_path, text_path, tokenizer, feature_extractor):
+    def __init__(
+        self, wav_scp_path, text_path, tokenizer, feature_extractor, split_name="train"
+    ):
         self.data = []
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
         self.timestamp_pattern = re.compile(r"<\|\d+\.\d+\|>")
+        self.split_name = split_name
 
         wav_paths = {}
         with open(wav_scp_path, "r", encoding="utf-8") as f:
@@ -70,7 +74,9 @@ class ESPnetStyleDataset(Dataset):
                     if audio_id in wav_paths:
                         self.data.append({"path": wav_paths[audio_id], "text": text})
 
-        logger.info(f"Dataset loaded: {len(self.data)} samples found.")
+        logger.info(
+            f"[{split_name.upper()}] Dataset loaded: {len(self.data)} samples found."
+        )
 
     def __len__(self):
         return len(self.data)
@@ -82,9 +88,16 @@ class ESPnetStyleDataset(Dataset):
             audio, sampling_rate=16000
         ).input_features[0]
 
-        # Dynamic Timestamp Logic
         raw_text = item["text"]
-        use_timestamps = random.random() > TIMESTAMP_DROP_PROB
+
+        # Determine timestamp logic
+        # For validation, we generally want deterministic behavior (no random dropping),
+        # but if you want to test robustness, you can leave it.
+        # Here we disable dropping for validation to ensure consistent metrics.
+        if self.split_name == "validation":
+            use_timestamps = True
+        else:
+            use_timestamps = random.random() > TIMESTAMP_DROP_PROB
 
         if use_timestamps:
             processed_text = raw_text
@@ -137,21 +150,14 @@ class DataCollatorSpeechSeq2SeqWithPadding:
 
 
 # ==========================================
-# 3. Custom Callback for Clear Logging
+# 3. Custom Callback
 # ==========================================
 class PrinterCallback(TrainerCallback):
     def on_log(self, args, state, control, logs=None, **kwargs):
-        """
-        Custom callback to print logs cleanly.
-        Hugging Face 'logs' dictionary usually contains: loss, learning_rate, epoch, step
-        """
         if logs is not None:
-            # Filter out keys we don't care about for the simple log
             _loss = logs.get("loss", None)
             _lr = logs.get("learning_rate", None)
             _epoch = logs.get("epoch", None)
-
-            # Only print if we actually have loss data (some steps only log other metrics)
             if _loss is not None:
                 logger.info(
                     f"Step {state.global_step} | Epoch: {_epoch:.2f} | Loss: {_loss:.4f} | LR: {_lr:.2e}"
@@ -178,37 +184,44 @@ def train():
     logger.info(
         f"Configuration -> Model: {MODEL_SIZE}, Batch: {batch_size}, Accum: {grad_accum}"
     )
-    logger.info(f"Using Device: {'cuda' if torch.cuda.is_available() else 'cpu'}")
 
-    # 2. Dataset Setup
-    dataset = ESPnetStyleDataset(WAV_SCP, TEXT_FILE, tokenizer, feature_extractor)
-    train_size = int(0.95 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = torch.utils.data.random_split(
-        dataset, [train_size, val_size]
+    # 2. Dataset Setup (Separate instances)
+    logger.info("Loading Training Data...")
+    train_dataset = ESPnetStyleDataset(
+        wav_scp_path=TRAIN_WAV_SCP,
+        text_path=TRAIN_TEXT_FILE,
+        tokenizer=tokenizer,
+        feature_extractor=feature_extractor,
+        split_name="train",
+    )
+
+    logger.info("Loading Validation Data...")
+    val_dataset = ESPnetStyleDataset(
+        wav_scp_path=VAL_WAV_SCP,
+        text_path=VAL_TEXT_FILE,
+        tokenizer=tokenizer,
+        feature_extractor=feature_extractor,
+        split_name="validation",
     )
 
     # 3. Training Arguments
     training_args = Seq2SeqTrainingArguments(
         output_dir=OUTPUT_DIR,
-        # --- Hyperparameters ---
         per_device_train_batch_size=batch_size,
         learning_rate=1e-6,
         lr_scheduler_type="linear",
         num_train_epochs=2,
         optim="adamw_torch",
-        # -----------------------
         gradient_accumulation_steps=grad_accum,
         warmup_steps=0,
         fp16=True if torch.cuda.is_available() else False,
         evaluation_strategy="epoch",
         save_strategy="epoch",
-        # --- Logging Settings ---
-        logging_dir=f"{OUTPUT_DIR}/logs",  # Tensorboard logs
+        logging_dir=f"{OUTPUT_DIR}/logs",
         logging_strategy="steps",
-        logging_steps=10,  # Log every 10 steps
+        logging_steps=10,
         logging_first_step=True,
-        report_to="none",  # Turn off WandB/Tensorboard external reporting if you just want local
+        report_to="none",
         predict_with_generate=True,
         generation_max_length=225,
         save_total_limit=2,
@@ -229,15 +242,13 @@ def train():
             feature_extractor, tokenizer
         ),
         tokenizer=tokenizer,
-        callbacks=[PrinterCallback],  # Add our custom logger callback
+        callbacks=[PrinterCallback],
     )
 
     logger.info("Starting training...")
     train_result = trainer.train()
 
-    # Log final stats
     logger.info(f"Training completed. Training Loss: {train_result.training_loss}")
-
     logger.info("Saving final model...")
     trainer.save_model(OUTPUT_DIR)
     tokenizer.save_pretrained(OUTPUT_DIR)
