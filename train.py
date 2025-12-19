@@ -38,12 +38,12 @@ OUTPUT_DIR = "./whisper-finetuned-multitalker"
 TIMESTAMP_DROP_PROB = 0.5
 
 # --- TRAIN DATA ---
-TRAIN_WAV_SCP = "path/to/train/wav.scp"
-TRAIN_TEXT_FILE = "path/to/train/text"
+TRAIN_WAV_SCP = "./train_v1/wav.scp"
+TRAIN_TEXT_FILE = "./train_v1/text"
 
 # --- VALIDATION DATA ---
-VAL_WAV_SCP = "path/to/validation/wav.scp"
-VAL_TEXT_FILE = "path/to/validation/text"
+VAL_WAV_SCP = "./valid_v1/wav.scp"
+VAL_TEXT_FILE = "./valid_v1/text"
 
 
 # ==========================================
@@ -91,9 +91,6 @@ class ESPnetStyleDataset(Dataset):
         raw_text = item["text"]
 
         # Determine timestamp logic
-        # For validation, we generally want deterministic behavior (no random dropping),
-        # but if you want to test robustness, you can leave it.
-        # Here we disable dropping for validation to ensure consistent metrics.
         if self.split_name == "validation":
             use_timestamps = True
         else:
@@ -158,9 +155,12 @@ class PrinterCallback(TrainerCallback):
             _loss = logs.get("loss", None)
             _lr = logs.get("learning_rate", None)
             _epoch = logs.get("epoch", None)
+            _grad = logs.get("grad_norm", 0.0)
+
             if _loss is not None:
+                grad_str = f"{_grad:.4f}" if _grad is not None else "NaN"
                 logger.info(
-                    f"Step {state.global_step} | Epoch: {_epoch:.2f} | Loss: {_loss:.4f} | LR: {_lr:.2e}"
+                    f"Step {state.global_step} | Epoch: {_epoch:.2f} | Loss: {_loss:.4f} | Grad: {grad_str} | LR: {_lr:.2e}"
                 )
 
 
@@ -176,16 +176,23 @@ def train():
     # 1. Determine Batch Size
     if "large" in MODEL_SIZE or "large" in MODEL_DIR:
         batch_size = 1
-        grad_accum = 8
+        grad_accum = 1
     else:
         batch_size = 2
-        grad_accum = 4
+        grad_accum = 1
 
     logger.info(
         f"Configuration -> Model: {MODEL_SIZE}, Batch: {batch_size}, Accum: {grad_accum}"
     )
 
-    # 2. Dataset Setup (Separate instances)
+    # 2. Check Precision Support
+    # We strictly enforce BF16 here as requested.
+    if torch.cuda.is_available() and not torch.cuda.is_bf16_supported():
+        logger.warning(
+            "WARNING: You requested BF16, but your GPU does not appear to support it. Training might crash or fall back to FP32."
+        )
+
+    # 3. Dataset Setup
     logger.info("Loading Training Data...")
     train_dataset = ESPnetStyleDataset(
         wav_scp_path=TRAIN_WAV_SCP,
@@ -204,7 +211,7 @@ def train():
         split_name="validation",
     )
 
-    # 3. Training Arguments
+    # 4. Training Arguments
     training_args = Seq2SeqTrainingArguments(
         output_dir=OUTPUT_DIR,
         per_device_train_batch_size=batch_size,
@@ -214,8 +221,11 @@ def train():
         optim="adamw_torch",
         gradient_accumulation_steps=grad_accum,
         warmup_steps=0,
-        fp16=True if torch.cuda.is_available() else False,
-        evaluation_strategy="epoch",
+        # --- PRECISION SETTINGS ---
+        bf16=True,  # Enabled BF16
+        fp16=False,  # Disabled FP16
+        # --------------------------
+        eval_strategy="epoch",
         save_strategy="epoch",
         logging_dir=f"{OUTPUT_DIR}/logs",
         logging_strategy="steps",
@@ -241,7 +251,7 @@ def train():
         data_collator=DataCollatorSpeechSeq2SeqWithPadding(
             feature_extractor, tokenizer
         ),
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
         callbacks=[PrinterCallback],
     )
 
