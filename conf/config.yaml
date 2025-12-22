@@ -1,0 +1,21 @@
+model_dir: /mnt/data/cyhuang/modified_whisper_model
+output_dir: /mnt/data/cyhuang/whisper-finetuned-multitalker
+model_size: small
+train_dir: ./train_v1
+valid_dir: ./valid_v1
+batch_size: 2
+learning_rate: 1e-6
+lr_scheduler_type: linear
+num_train_epochs: 2
+optim: adamw_torch
+warmup_steps: 0
+gradient_accumulation_steps: 1
+# bf16: true
+logging_steps: 10
+save_steps: 2000
+eval_steps: 2000
+save_total_limit: 1
+metric_for_best_model: wer
+greater_is_better: false
+generation_max_length: 225
+generation_num_beams: 1
