@@ -332,27 +332,30 @@ def train(cfg):
     try:
         sample_item = [train_dataset[0], train_dataset[1]]
         batch = data_collator(sample_item)
-        labels = batch["labels"][0]
+        labels = batch["labels"]
 
         # valid_labels = [l for l in labels.tolist() if l != -100]
-        valid_labels = labels.tolist()
+        for l in labels:
+            valid_labels = l.tolist()
+            raw_tokens = tokenizer.convert_ids_to_tokens(valid_labels)
+            logger.info(f"Token list: {raw_tokens}")
 
         # Show Tokens
-        raw_tokens = tokenizer.convert_ids_to_tokens(valid_labels)
-        logger.info(f"Token list: {raw_tokens}")
+        # raw_tokens = tokenizer.convert_ids_to_tokens(valid_labels)
+        # logger.info(f"Token list: {raw_tokens}")
 
         # Verify correctness
-        if raw_tokens[0] == "<|startoftranscript|>":
-            logger.info("✅ SUCCESS: Sequence starts with <|startoftranscript|>")
-        else:
-            logger.error(
-                f"❌ ERROR: Sequence starts with {raw_tokens[0]} (Expected <|startoftranscript|>)"
-            )
+        # if raw_tokens[0] == "<|startoftranscript|>":
+        #     logger.info("✅ SUCCESS: Sequence starts with <|startoftranscript|>")
+        # else:
+        #     logger.error(
+        #         f"❌ ERROR: Sequence starts with {raw_tokens[0]} (Expected <|startoftranscript|>)"
+        #     )
 
-        if "<|notimestamps|>" in raw_tokens:
-            logger.warning(
-                "⚠️ WARNING: <|notimestamps|> found (Should be rare/none with PROB=0.0)"
-            )
+        # if "<|notimestamps|>" in raw_tokens:
+        #     logger.warning(
+        #         "⚠️ WARNING: <|notimestamps|> found (Should be rare/none with PROB=0.0)"
+        #     )
 
     except Exception as e:
         logger.error(f"Failed to inspect data: {e}")
