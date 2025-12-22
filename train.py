@@ -1,3 +1,5 @@
+import argparse
+import datetime
 import torch
 import librosa
 import re
@@ -5,6 +7,7 @@ import random
 import logging
 import sys
 import os
+import yaml
 from torch.utils.data import Dataset
 from transformers import (
     WhisperTokenizer,
@@ -16,38 +19,29 @@ from transformers import (
 )
 from dataclasses import dataclass
 from typing import Any, Dict, List, Union
-import evaluate
+from pathlib import Path
+from omegaconf import OmegaConf
 import speech_metrics
 
-# ==========================================
-# 0. Logger Setup
-# ==========================================
-logging.basicConfig(
-    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-    datefmt="%m/%d/%Y %H:%M:%S",
-    handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler("training.log")],
-    level=logging.INFO,
-)
-logger = logging.getLogger(__name__)
 
 # ==========================================
 # 1. Configuration
 # ==========================================
-MODEL_SIZE = "small"
-MODEL_DIR = "/mnt/data/cyhuang/modified_whisper_model"
-OUTPUT_DIR = "/mnt/data/cyhuang/whisper-finetuned-multitalker"
+# MODEL_SIZE = "small"
+# MODEL_DIR = "/mnt/data/cyhuang/modified_whisper_model"
+# OUTPUT_DIR = "/mnt/data/cyhuang/whisper-finetuned-multitalker"
 
 # === CRITICAL FIX: Disable Timestamp Dropping ===
 # We want the model to ALWAYS predict timestamps.
 TIMESTAMP_DROP_PROB = 1.0
 
 # --- TRAIN DATA ---
-TRAIN_WAV_SCP = "./train_v1/wav.scp"
-TRAIN_TEXT_FILE = "./train_v1/text"
+# TRAIN_WAV_SCP = "./train_v1/wav.scp"
+# TRAIN_TEXT_FILE = "./train_v1/text"
 
 # --- VALIDATION DATA ---
-VAL_WAV_SCP = "./valid_v1/wav.scp"
-VAL_TEXT_FILE = "./valid_v1/text"
+# VAL_WAV_SCP = "./valid_v1/wav.scp"
+# VAL_TEXT_FILE = "./valid_v1/text"
 
 
 TS = r"<\|\d+(?:\.\d+)?\|>"
@@ -145,18 +139,10 @@ class ESPnetStyleDataset(Dataset):
 
         if use_timestamps:
             processed_text = raw_text
-            # === CORRECT SEQUENCE: <|startoftranscript|> <|en|> <|transcribe|> ===
-            # prefix_tokens = [self.sot_id, self.en_id, self.transcribe_id]
         else:
             processed_text = remove_whisper_timestamps_text(raw_text)
-            # processed_text = self.timestamp_pattern.sub("", raw_text)
-            # processed_text = " ".join(processed_text.split())
-            # === CORRECT SEQUENCE: <|startoftranscript|> <|en|> <|transcribe|> <|notimestamps|> ===
 
-        # text_ids = self.tokenizer.encode(processed_text, add_special_tokens=False)
         text_ids = self.tokenizer.encode(processed_text)
-        # suffix_tokens = [self.tokenizer.eos_token_id]
-        # labels = prefix_tokens + text_ids + suffix_tokens
         labels = text_ids
 
         return {"input_features": input_features, "labels": labels}
@@ -181,13 +167,6 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         labels = labels_batch["input_ids"].masked_fill(
             labels_batch.attention_mask.ne(1), -100
         )
-
-        # If the collator accidentally adds BOS at the start (common HF behavior), remove it
-        # because we manually constructed our prefix starting with <|startoftranscript|>
-        """
-        if (labels[:, 0] == self.tokenizer.bos_token_id).all().cpu().item():
-            labels = labels[:, 1:]
-        """
 
         batch["labels"] = labels
         return batch
@@ -220,7 +199,13 @@ class PrinterCallback(TrainerCallback):
 # ==========================================
 # 4. Main Training Loop
 # ==========================================
-def train():
+def train(cfg):
+    MODEL_DIR = cfg.model_dir
+    MODEL_SIZE = cfg.model_size
+    TRAIN_WAV_SCP = Path(cfg.train_dir) / "wav.scp"
+    TRAIN_TEXT_FILE = Path(cfg.train_dir) / "text"
+    VAL_WAV_SCP = Path(cfg.valid_dir) / "wav.scp"
+    VAL_TEXT_FILE = Path(cfg.valid_dir) / "text"
     logger.info("Initializing Model and Tokenizer...")
     feature_extractor = WhisperFeatureExtractor.from_pretrained(MODEL_DIR)
     tokenizer = WhisperTokenizer.from_pretrained(MODEL_DIR)
@@ -228,13 +213,6 @@ def train():
         language="english", task="transcribe", predict_timestamps=False
     )
     model = WhisperForConditionalGeneration.from_pretrained(MODEL_DIR)
-
-    # 1. Determine Batch Size
-    if "large" in MODEL_SIZE or "large" in MODEL_DIR:
-        batch_size = 1
-    else:
-        batch_size = 2
-    grad_accum = 1
 
     logger.info(
         f"Configuration -> Model: {MODEL_SIZE}, Batch: {batch_size}, Accum: {grad_accum}"
@@ -266,9 +244,6 @@ def train():
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(feature_extractor, tokenizer)
 
     # 3. Metrics
-    metric_wer = evaluate.load("wer")
-    metric_cer = evaluate.load("cer")
-
     def compute_metrics(pred):
         pred_ids = pred.predictions
         label_ids = pred.label_ids
@@ -282,40 +257,54 @@ def train():
         wer = speech_metrics.wer(pred_str, label_str)
         cer = speech_metrics.cer(pred_str, label_str)
 
-        # wer = metric_wer.compute(predictions=pred_str, references=label_str)
-        # cer = metric_cer.compute(predictions=pred_str, references=label_str)
-
         return {"wer": wer, "cer": cer}
 
     # 4. Training Arguments
+    OUTPUT_DIR = cfg.output_dir
+    learning_rate = cfg.learning_rate
+    lr_scheduler_type = cfg.lr_scheduler_type
+    num_train_epochs = cfg.num_train_epochs
+    optim = cfg.optim
+    warmup_steps = cfg.warmup_steps
+    logging_steps = cfg.logging_steps
+    save_steps = cfg.save_steps
+    eval_steps = cfg.eval_steps
+    save_total_limit = cfg.save_total_limit
+    metric_for_best_model = cfg.metric_for_best_model
+    greater_is_better = cfg.greater_is_better
+    generation_max_length = cfg.generation_max_length
+    generation_num_beams = cfg.generation_num_beams
+    batch_size = cfg.batch_size
+    grad_accum = cfg.grad_accum
+
     training_args = Seq2SeqTrainingArguments(
         output_dir=OUTPUT_DIR,
         per_device_train_batch_size=batch_size,
-        learning_rate=1e-6,
-        lr_scheduler_type="linear",
-        num_train_epochs=2,
-        optim="adamw_torch",
+        learning_rate=learning_rate,
+        lr_scheduler_type=lr_scheduler_type,
+        num_train_epochs=num_train_epochs,
+        optim=optim,
         gradient_accumulation_steps=grad_accum,
-        warmup_steps=0,
+        warmup_steps=warmup_steps,
         bf16=True,
         fp16=False,
         # --- LOGGING ---
         report_to=["tensorboard"],
         logging_dir=f"{OUTPUT_DIR}/logs",
         logging_strategy="steps",
-        logging_steps=10,
+        logging_steps=logging_steps,
         # --- EVALUATION ---
         eval_strategy="steps",
-        eval_steps=2000,
+        eval_steps=eval_steps,
         save_strategy="steps",
-        save_steps=2000,
-        save_total_limit=1,  # Fix disk space issue: keep only 1 checkpoint
-        metric_for_best_model="wer",
-        greater_is_better=False,
+        save_steps=save_steps,
+        save_total_limit=save_total_limit,  # Fix disk space issue: keep only 1 checkpoint
+        metric_for_best_model=metric_for_best_model,
+        greater_is_better=greater_is_better,
         # --- GENERATION ---
         predict_with_generate=True,
-        generation_max_length=225,
-        generation_num_beams=1,  # Greedy decoding for speed
+        generation_max_length=generation_max_length,
+        generation_num_beams=generation_num_beams,
         remove_unused_columns=False,
     )
 
@@ -341,11 +330,12 @@ def train():
     # ====================================================
     logger.info("=== MANUAL DATA INSPECTION ===")
     try:
-        sample_item = train_dataset[0]
-        batch = data_collator([sample_item])
+        sample_item = [train_dataset[0], train_dataset[1]]
+        batch = data_collator(sample_item)
         labels = batch["labels"][0]
 
-        valid_labels = [l for l in labels.tolist() if l != -100]
+        # valid_labels = [l for l in labels.tolist() if l != -100]
+        valid_labels = labels.tolist()
 
         # Show Tokens
         raw_tokens = tokenizer.convert_ids_to_tokens(valid_labels)
@@ -387,4 +377,31 @@ def train():
 
 
 if __name__ == "__main__":
-    train()
+    # ==========================================
+    # 0. Logger Setup
+    # ==========================================
+    log_dir = Path("logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file = log_dir / f"training_{run_ts}.log"
+
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        handlers=[
+            logging.StreamHandler(sys.stdout),
+            logging.FileHandler(log_file, encoding="utf-8"),
+        ],
+        level=logging.INFO,
+        force=True,  # ensures it takes effect even if logging was configured earlier
+    )
+
+    logger = logging.getLogger(__name__)
+    logger.info("Logging initialized. log_file=%s", log_file)
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config_path", type=Path, required=True)
+    args = parser.parse_args()
+    config = OmegaConf.load(args.config_path)
+    train(config)
