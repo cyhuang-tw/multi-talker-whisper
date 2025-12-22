@@ -214,10 +214,6 @@ def train(cfg):
     )
     model = WhisperForConditionalGeneration.from_pretrained(MODEL_DIR)
 
-    logger.info(
-        f"Configuration -> Model: {MODEL_SIZE}, Batch: {batch_size}, Accum: {grad_accum}"
-    )
-
     # 2. Dataset Setup
     logger.info("Loading Training Data...")
     train_dataset = ESPnetStyleDataset(
@@ -276,6 +272,10 @@ def train(cfg):
     generation_num_beams = cfg.generation_num_beams
     batch_size = cfg.batch_size
     grad_accum = cfg.grad_accum
+
+    logger.info(
+        f"Configuration -> Model: {MODEL_SIZE}, Batch: {batch_size}, Accum: {grad_accum}"
+    )
 
     training_args = Seq2SeqTrainingArguments(
         output_dir=OUTPUT_DIR,
