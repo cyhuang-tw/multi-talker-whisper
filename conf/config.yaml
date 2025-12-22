@@ -9,7 +9,7 @@ lr_scheduler_type: linear
 num_train_epochs: 2
 optim: adamw_torch
 warmup_steps: 0
-gradient_accumulation_steps: 1
+grad_accum: 1
 # bf16: true
 logging_steps: 10
 save_steps: 2000
