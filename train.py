@@ -222,7 +222,6 @@ def train(cfg):
         tokenizer,
         feature_extractor,
         split_name="train",
-        num_workers=8,
     )
 
     logger.info("Loading Validation Data...")
@@ -232,7 +231,6 @@ def train(cfg):
         tokenizer,
         feature_extractor,
         split_name="validation",
-        num_workers=8,
     )
 
     # === FIX: Slice Validation Data for Speed ===
@@ -312,6 +310,8 @@ def train(cfg):
         generation_max_length=generation_max_length,
         generation_num_beams=generation_num_beams,
         remove_unused_columns=False,
+        dataloader_num_workers=8,
+        dataloader_pin_memory=True,
     )
 
     # Force standard English prompt during validation
