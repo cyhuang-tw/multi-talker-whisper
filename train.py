@@ -217,7 +217,12 @@ def train(cfg):
     # 2. Dataset Setup
     logger.info("Loading Training Data...")
     train_dataset = ESPnetStyleDataset(
-        TRAIN_WAV_SCP, TRAIN_TEXT_FILE, tokenizer, feature_extractor, split_name="train"
+        TRAIN_WAV_SCP,
+        TRAIN_TEXT_FILE,
+        tokenizer,
+        feature_extractor,
+        split_name="train",
+        num_workers=8,
     )
 
     logger.info("Loading Validation Data...")
@@ -227,6 +232,7 @@ def train(cfg):
         tokenizer,
         feature_extractor,
         split_name="validation",
+        num_workers=8,
     )
 
     # === FIX: Slice Validation Data for Speed ===
@@ -334,29 +340,10 @@ def train(cfg):
         batch = data_collator(sample_item)
         labels = batch["labels"]
 
-        # valid_labels = [l for l in labels.tolist() if l != -100]
         for l in labels:
             valid_labels = l.tolist()
             raw_tokens = tokenizer.convert_ids_to_tokens(valid_labels)
             logger.info(f"Token list: {raw_tokens}")
-
-        # Show Tokens
-        # raw_tokens = tokenizer.convert_ids_to_tokens(valid_labels)
-        # logger.info(f"Token list: {raw_tokens}")
-
-        # Verify correctness
-        # if raw_tokens[0] == "<|startoftranscript|>":
-        #     logger.info("✅ SUCCESS: Sequence starts with <|startoftranscript|>")
-        # else:
-        #     logger.error(
-        #         f"❌ ERROR: Sequence starts with {raw_tokens[0]} (Expected <|startoftranscript|>)"
-        #     )
-
-        # if "<|notimestamps|>" in raw_tokens:
-        #     logger.warning(
-        #         "⚠️ WARNING: <|notimestamps|> found (Should be rare/none with PROB=0.0)"
-        #     )
-
     except Exception as e:
         logger.error(f"Failed to inspect data: {e}")
     logger.info("==================================")
