@@ -33,7 +33,7 @@ import speech_metrics
 
 # === CRITICAL FIX: Disable Timestamp Dropping ===
 # We want the model to ALWAYS predict timestamps.
-TIMESTAMP_DROP_PROB = 1.0
+# TIMESTAMP_DROP_PROB = 1.0
 
 # --- TRAIN DATA ---
 # TRAIN_WAV_SCP = "./train_v1/wav.scp"
@@ -78,13 +78,20 @@ def remove_whisper_timestamps_text(
 # ==========================================
 class ESPnetStyleDataset(Dataset):
     def __init__(
-        self, wav_scp_path, text_path, tokenizer, feature_extractor, split_name="train"
+        self,
+        wav_scp_path,
+        text_path,
+        tokenizer,
+        feature_extractor,
+        use_timestamps,
+        split_name="train",
     ):
         self.data = []
         self.tokenizer = tokenizer
         self.feature_extractor = feature_extractor
         self.timestamp_pattern = re.compile(r"<\|\d+\.\d+\|>")
         self.split_name = split_name
+        self.use_timestamps = use_timestamps
 
         # === CRITICAL FIX: Pre-calculate the correct Start Token ===
         # Whisper MUST start with <|startoftranscript|> (50258), NOT <|endoftext|> (50257)
@@ -132,12 +139,14 @@ class ESPnetStyleDataset(Dataset):
         raw_text = item["text"]
 
         # Determine timestamp logic
+        """
         if self.split_name == "validation":
             use_timestamps = False
         else:
             use_timestamps = random.random() > TIMESTAMP_DROP_PROB
+        """
 
-        if use_timestamps:
+        if self.use_timestamps:
             processed_text = raw_text
         else:
             processed_text = remove_whisper_timestamps_text(raw_text)
@@ -206,11 +215,13 @@ def train(cfg):
     TRAIN_TEXT_FILE = Path(cfg.train_dir) / "text"
     VAL_WAV_SCP = Path(cfg.valid_dir) / "wav.scp"
     VAL_TEXT_FILE = Path(cfg.valid_dir) / "text"
+    use_timestamps = cfg.use_timestamps
     logger.info("Initializing Model and Tokenizer...")
+    logger.info(f"Training with timestamps: {use_timestamps}")
     feature_extractor = WhisperFeatureExtractor.from_pretrained(MODEL_DIR)
     tokenizer = WhisperTokenizer.from_pretrained(MODEL_DIR)
     tokenizer.set_prefix_tokens(
-        language="english", task="transcribe", predict_timestamps=False
+        language="english", task="transcribe", predict_timestamps=use_timestamps
     )
     model = WhisperForConditionalGeneration.from_pretrained(MODEL_DIR)
 
@@ -221,6 +232,7 @@ def train(cfg):
         TRAIN_TEXT_FILE,
         tokenizer,
         feature_extractor,
+        use_timestamps,
         split_name="train",
     )
 
@@ -230,6 +242,7 @@ def train(cfg):
         VAL_TEXT_FILE,
         tokenizer,
         feature_extractor,
+        use_timestamps,
         split_name="validation",
     )
 
@@ -310,7 +323,7 @@ def train(cfg):
         generation_max_length=generation_max_length,
         generation_num_beams=generation_num_beams,
         remove_unused_columns=False,
-        dataloader_num_workers=8,
+        dataloader_num_workers=32,
         dataloader_pin_memory=True,
     )
 
