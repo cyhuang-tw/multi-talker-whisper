@@ -3,6 +3,8 @@ output_dir: /mnt/data/cyhuang/whisper-finetuned-multitalker-v0-20251229
 model_size: small
 train_dir: ./train_v1
 valid_dir: ./valid_v1
+train_text_file: text
+valid_text_file: text
 use_timestamps: false
 batch_size: 32
 learning_rate: 1e-6

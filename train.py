@@ -3,11 +3,9 @@ from datetime import datetime
 import torch
 import librosa
 import re
-import random
 import logging
 import sys
 import os
-import yaml
 from torch.utils.data import Dataset
 from transformers import (
     WhisperTokenizer,
@@ -212,9 +210,9 @@ def train(cfg):
     MODEL_DIR = cfg.model_dir
     MODEL_SIZE = cfg.model_size
     TRAIN_WAV_SCP = Path(cfg.train_dir) / "wav.scp"
-    TRAIN_TEXT_FILE = Path(cfg.train_dir) / "text"
+    TRAIN_TEXT_FILE = Path(cfg.train_dir) / cfg.train_text_file
     VAL_WAV_SCP = Path(cfg.valid_dir) / "wav.scp"
-    VAL_TEXT_FILE = Path(cfg.valid_dir) / "text"
+    VAL_TEXT_FILE = Path(cfg.valid_dir) / cfg.valid_text_file
     use_timestamps = cfg.use_timestamps
     logger.info("Initializing Model and Tokenizer...")
     logger.info(f"Training with timestamps: {use_timestamps}")
