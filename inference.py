@@ -51,10 +51,16 @@ def main(model_dir: Path, audio_path: Path, predict_time: bool) -> None:
         "return_dict_in_generate": True,
     }
     # model.generation_config.update(**gen_kwargs)
+    prefix = "<|startoftranscript|><|en|><|transcribe|>"
+    if not predict_time:
+        prefix = f"{prefix}<|notimestamps|>"
+    prefix_ids = tokenizer(prefix, add_special_tokens=False, return_tensors="pt")
+    prefix_ids.input_ids.to(device)
 
     output = model.generate(
         **inputs,
         **gen_kwargs,
+        forced_decoder_ids=prefix_ids.input_ids,
     )
 
     pred_text = tokenizer.convert_tokens_to_string(
