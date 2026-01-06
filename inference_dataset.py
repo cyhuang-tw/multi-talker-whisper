@@ -33,11 +33,17 @@ def main(
     metadata = [json.loads(line) for line in jsonl_path.open(mode="r").readlines()]
     outputs = []
 
+    """
     prefix = "<|startoftranscript|><|en|><|transcribe|>"
     if not predict_time:
         prefix = f"{prefix}<|notimestamps|>"
     prefix_ids = tokenizer(prefix, add_special_tokens=False, return_tensors="pt")
     prefix_ids.input_ids.to(device)
+    """
+    no_ts = not predict_time
+    forced = processor.get_decoder_prompt_ids(
+        language="en", task="transcribe", no_timestamps=no_ts
+    )
 
     for item in metadata:
         audio_path = DATA_PREFIX / item["wavs"][0]
@@ -69,7 +75,7 @@ def main(
         output = model.generate(
             **inputs,
             **gen_kwargs,
-            forced_decoder_ids=prefix_ids.input_ids,
+            forced_decoder_ids=forced,
         )
 
         pred_text = tokenizer.convert_tokens_to_string(
