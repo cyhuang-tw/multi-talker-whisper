@@ -15,31 +15,14 @@ from transformers import (
     Seq2SeqTrainer,
     TrainerCallback,
 )
+from transformers import WhisperProcessor
 from dataclasses import dataclass
 from typing import Any, Dict, List, Union
 from pathlib import Path
 from omegaconf import OmegaConf
-import speech_metrics
+import evaluate
 
 
-# ==========================================
-# 1. Configuration
-# ==========================================
-# MODEL_SIZE = "small"
-# MODEL_DIR = "/mnt/data/cyhuang/modified_whisper_model"
-# OUTPUT_DIR = "/mnt/data/cyhuang/whisper-finetuned-multitalker"
-
-# === CRITICAL FIX: Disable Timestamp Dropping ===
-# We want the model to ALWAYS predict timestamps.
-# TIMESTAMP_DROP_PROB = 1.0
-
-# --- TRAIN DATA ---
-# TRAIN_WAV_SCP = "./train_v1/wav.scp"
-# TRAIN_TEXT_FILE = "./train_v1/text"
-
-# --- VALIDATION DATA ---
-# VAL_WAV_SCP = "./valid_v1/wav.scp"
-# VAL_TEXT_FILE = "./valid_v1/text"
 
 
 TS = r"<\|\d+(?:\.\d+)?\|>"
@@ -137,13 +120,6 @@ class ESPnetStyleDataset(Dataset):
         raw_text = item["text"]
 
         # Determine timestamp logic
-        """
-        if self.split_name == "validation":
-            use_timestamps = False
-        else:
-            use_timestamps = random.random() > TIMESTAMP_DROP_PROB
-        """
-
         if self.use_timestamps:
             processed_text = raw_text
         else:
@@ -157,25 +133,30 @@ class ESPnetStyleDataset(Dataset):
 
 @dataclass
 class DataCollatorSpeechSeq2SeqWithPadding:
-    feature_extractor: Any
-    tokenizer: Any
+    processor: Any
+    decoder_start_token_id: int
 
-    def __call__(
-        self, features: List[Dict[str, Union[List[int], torch.Tensor]]]
-    ) -> Dict[str, torch.Tensor]:
-        input_features = [
-            {"input_features": feature["input_features"]} for feature in features
-        ]
+    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
+        # split inputs and labels since they have to be of different lengths and need different padding methods
+        # first treat the audio inputs by simply returning torch tensors
+        input_features = [{"input_features": feature["input_features"]} for feature in features]
+        batch = self.processor.feature_extractor.pad(input_features, return_tensors="pt")
+
+        # get the tokenized label sequences
         label_features = [{"input_ids": feature["labels"]} for feature in features]
+        # pad the labels to max length
+        labels_batch = self.processor.tokenizer.pad(label_features, return_tensors="pt")
 
-        batch = self.feature_extractor.pad(input_features, return_tensors="pt")
-        labels_batch = self.tokenizer.pad(label_features, return_tensors="pt")
+        # replace padding with -100 to ignore loss correctly
+        labels = labels_batch["input_ids"].masked_fill(labels_batch.attention_mask.ne(1), -100)
 
-        labels = labels_batch["input_ids"].masked_fill(
-            labels_batch.attention_mask.ne(1), -100
-        )
+        # if bos token is appended in previous tokenization step,
+        # cut bos token here as it's append later anyways
+        if (labels[:, 0] == self.decoder_start_token_id).all().cpu().item():
+            labels = labels[:, 1:]
 
         batch["labels"] = labels
+
         return batch
 
 
@@ -218,10 +199,13 @@ def train(cfg):
     logger.info(f"Training with timestamps: {use_timestamps}")
     feature_extractor = WhisperFeatureExtractor.from_pretrained(MODEL_DIR)
     tokenizer = WhisperTokenizer.from_pretrained(MODEL_DIR)
-    tokenizer.set_prefix_tokens(
-        language="english", task="transcribe", predict_timestamps=use_timestamps
-    )
+    processor = WhisperProcessor(feature_extractor, tokenizer)
     model = WhisperForConditionalGeneration.from_pretrained(MODEL_DIR)
+
+    model.generation_config.language = "english"
+    model.generation_config.task = "transcribe"
+
+    model.generation_config.forced_decoder_ids = None
 
     # 2. Dataset Setup
     logger.info("Loading Training Data...")
@@ -247,28 +231,33 @@ def train(cfg):
     # === FIX: Slice Validation Data for Speed ===
     if len(val_dataset) > 2000:
         logger.info(
-            f"Optimization: Slicing validation set from {len(val_dataset)} to 500 samples."
+            f"Optimization: Slicing validation set from {len(val_dataset)} to 2000 samples."
         )
         val_dataset.data = val_dataset.data[:2000]
     # ============================================
 
-    data_collator = DataCollatorSpeechSeq2SeqWithPadding(feature_extractor, tokenizer)
+    # data_collator = DataCollatorSpeechSeq2SeqWithPadding(feature_extractor, tokenizer)
+    data_collator = DataCollatorSpeechSeq2SeqWithPadding(
+    processor=processor,
+    decoder_start_token_id=model.config.decoder_start_token_id,
+    )
 
     # 3. Metrics
+    metric = evaluate.load("wer")
     def compute_metrics(pred):
         pred_ids = pred.predictions
         label_ids = pred.label_ids
 
+        # replace -100 with the pad_token_id
         label_ids[label_ids == -100] = tokenizer.pad_token_id
 
-        # Decode with skip_special_tokens=True to remove timestamps for clean WER
+        # we do not want to group tokens when computing the metrics
         pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
         label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
 
-        wer = speech_metrics.wer(pred_str, label_str)
-        cer = speech_metrics.cer(pred_str, label_str)
+        wer = 100 * metric.compute(predictions=pred_str, references=label_str)
 
-        return {"wer": wer, "cer": cer}
+        return {"wer": wer}
 
     # 4. Training Arguments
     OUTPUT_DIR = cfg.output_dir
@@ -304,7 +293,7 @@ def train(cfg):
         bf16=True,
         fp16=False,
         # --- LOGGING ---
-        report_to=["tensorboard"],
+        report_to=["tensorboard", "wandb"],
         logging_dir=f"{OUTPUT_DIR}/logs",
         logging_strategy="steps",
         logging_steps=logging_steps,
@@ -361,6 +350,8 @@ def train(cfg):
     # ====================================================
 
     # 7. Start Training
+    processor.save_pretrained(OUTPUT_DIR)
+    tokenizer.save_pretrained(OUTPUT_DIR)
     if os.path.isdir(OUTPUT_DIR) and any(
         "checkpoint" in f for f in os.listdir(OUTPUT_DIR)
     ):
@@ -373,7 +364,6 @@ def train(cfg):
     logger.info(f"Training completed. Training Loss: {train_result.training_loss}")
     logger.info("Saving final model...")
     trainer.save_model(OUTPUT_DIR)
-    tokenizer.save_pretrained(OUTPUT_DIR)
     logger.info(f"Model saved to {OUTPUT_DIR}")
 
 
