@@ -23,8 +23,6 @@ from omegaconf import OmegaConf
 import evaluate
 
 
-
-
 TS = r"<\|\d+(?:\.\d+)?\|>"
 TS_RE = re.compile(TS)
 
@@ -136,11 +134,17 @@ class DataCollatorSpeechSeq2SeqWithPadding:
     processor: Any
     decoder_start_token_id: int
 
-    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
+    def __call__(
+        self, features: List[Dict[str, Union[List[int], torch.Tensor]]]
+    ) -> Dict[str, torch.Tensor]:
         # split inputs and labels since they have to be of different lengths and need different padding methods
         # first treat the audio inputs by simply returning torch tensors
-        input_features = [{"input_features": feature["input_features"]} for feature in features]
-        batch = self.processor.feature_extractor.pad(input_features, return_tensors="pt")
+        input_features = [
+            {"input_features": feature["input_features"]} for feature in features
+        ]
+        batch = self.processor.feature_extractor.pad(
+            input_features, return_tensors="pt"
+        )
 
         # get the tokenized label sequences
         label_features = [{"input_ids": feature["labels"]} for feature in features]
@@ -148,7 +152,9 @@ class DataCollatorSpeechSeq2SeqWithPadding:
         labels_batch = self.processor.tokenizer.pad(label_features, return_tensors="pt")
 
         # replace padding with -100 to ignore loss correctly
-        labels = labels_batch["input_ids"].masked_fill(labels_batch.attention_mask.ne(1), -100)
+        labels = labels_batch["input_ids"].masked_fill(
+            labels_batch.attention_mask.ne(1), -100
+        )
 
         # if bos token is appended in previous tokenization step,
         # cut bos token here as it's append later anyways
@@ -198,14 +204,14 @@ def train(cfg):
     logger.info("Initializing Model and Tokenizer...")
     logger.info(f"Training with timestamps: {use_timestamps}")
     feature_extractor = WhisperFeatureExtractor.from_pretrained(MODEL_DIR)
-    tokenizer = WhisperTokenizer.from_pretrained(MODEL_DIR)
+    tokenizer = WhisperTokenizer.from_pretrained(
+        MODEL_DIR,
+        language="english",
+        task="transcribe",
+        predict_timestamps=use_timestamps,
+    )
     processor = WhisperProcessor(feature_extractor, tokenizer)
     model = WhisperForConditionalGeneration.from_pretrained(MODEL_DIR)
-
-    model.generation_config.language = "english"
-    model.generation_config.task = "transcribe"
-
-    model.generation_config.forced_decoder_ids = None
 
     # 2. Dataset Setup
     logger.info("Loading Training Data...")
@@ -229,21 +235,24 @@ def train(cfg):
     )
 
     # === FIX: Slice Validation Data for Speed ===
+    """
     if len(val_dataset) > 2000:
         logger.info(
             f"Optimization: Slicing validation set from {len(val_dataset)} to 2000 samples."
         )
         val_dataset.data = val_dataset.data[:2000]
+    """
     # ============================================
 
     # data_collator = DataCollatorSpeechSeq2SeqWithPadding(feature_extractor, tokenizer)
     data_collator = DataCollatorSpeechSeq2SeqWithPadding(
-    processor=processor,
-    decoder_start_token_id=model.config.decoder_start_token_id,
+        processor=processor,
+        decoder_start_token_id=model.config.decoder_start_token_id,
     )
 
     # 3. Metrics
     metric = evaluate.load("wer")
+
     def compute_metrics(pred):
         pred_ids = pred.predictions
         label_ids = pred.label_ids
